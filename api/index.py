@@ -1,7 +1,5 @@
 from flask import Flask, request
 import os, psycopg2, re, requests
-from PIL import Image, ImageDraw, ImageFont
-import random
 
 app = Flask(__name__)
 
@@ -38,42 +36,14 @@ def init_db():
             thread_id BIGINT,
             action TEXT,
             message TEXT,
+            photo_file_id TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    cur.execute("ALTER TABLE bot_logs ADD COLUMN IF NOT EXISTS photo_file_id TEXT")
     conn.commit()
     cur.close()
     conn.close()
-
-# === FUNGSI BIKIN FOTO TULISAN ===
-def create_text_image(text_username, action="/start"):
-    W, H = 800, 450
-    # Warna random keren
-    colors = [(30,30,46), (17,24,39), (88,28,135), (15,23,42), (120,40,40)]
-    bg = random.choice(colors)
-    img = Image.new('RGB', (W, H), bg)
-    draw = ImageDraw.Draw(img)
-    
-    # Coba load font bold, fallback default
-    try:
-        font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 42)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
-    except:
-        font_big = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-
-    # Tulis
-    draw.text((50, 30), f"{action} DETECTED", font=font_small, fill=(160,160,255))
-    draw.text((50, 120), f"author :", font=font_small, fill=(200,200,200))
-    draw.text((50, 160), f"@{text_username}", font=font_big, fill=(255,255,255))
-    draw.text((50, 280), f"JogjaLend Sync Bot", font=font_small, fill=(150,150,150))
-    
-    # Garis hiasan
-    draw.rectangle([50, 350, 750, 360], fill=(100,100,255))
-
-    path = f"/tmp/{text_username}_{action}.png"
-    img.save(path)
-    return path
 
 def send_message(chat_id, text, thread_id=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -82,18 +52,27 @@ def send_message(chat_id, text, thread_id=None):
         payload["message_thread_id"] = thread_id
     requests.post(url, json=payload)
 
-def send_photo_with_text(chat_id, image_path, caption, thread_id=None):
+def send_photo(chat_id, file_id, caption, thread_id=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    with open(image_path, 'rb') as f:
-        files = {'photo': f}
-        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-        if thread_id:
-            data["message_thread_id"] = thread_id
-        requests.post(url, data=data, files=files)
+    payload = {"chat_id": chat_id, "photo": file_id, "caption": caption, "parse_mode": "HTML"}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    requests.post(url, json=payload)
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
     requests.post(url, json={"chat_id": chat_id, "message_id": message_id})
+
+def get_user_photo_file_id(user_id):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos"
+        r = requests.get(url, params={"user_id": user_id, "limit": 1}).json()
+        if r.get("ok") and r["result"]["total_count"] > 0:
+            # ambil foto paling besar
+            return r["result"]["photos"][0][-1]["file_id"]
+    except Exception as e:
+        print("GET PHOTO ERROR:", e)
+    return None
 
 def is_verified(username):
     if not username: return False
@@ -105,14 +84,14 @@ def is_verified(username):
     conn.close()
     return bool(row)
 
-def save_log(user_id, username, first_name, chat_id, chat_title, thread_id, action, msg=""):
+def save_log(user_id, username, first_name, chat_id, chat_title, thread_id, action, msg="", photo_id=None):
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO bot_logs (user_id, username, first_name, chat_id, chat_title, thread_id, action, message)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (user_id, username, first_name, chat_id, chat_title, thread_id, action, msg[:500]))
+            INSERT INTO bot_logs (user_id, username, first_name, chat_id, chat_title, thread_id, action, message, photo_file_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (user_id, username, first_name, chat_id, chat_title, thread_id, action, msg[:500], photo_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -134,19 +113,25 @@ def webhook():
         thread_id = message.get('message_thread_id')
         sender = message.get('from', {})
         chat_info = message.get('chat', {})
-        sender_username = sender.get('username','').lower() or f"user{sender.get('id')}"
+        sender_username = sender.get('username','').lower()
         sender_id = sender.get('id')
         first_name = sender.get('first_name','')
         chat_title = chat_info.get('title','Private')
 
-        save_log(sender_id, sender_username, first_name, chat_id, chat_title, thread_id, "message", text)
+        # AMBIL FOTO PROFIL
+        photo_file_id = get_user_photo_file_id(sender_id)
+        save_log(sender_id, sender_username, first_name, chat_id, chat_title, thread_id, "message", text, photo_file_id)
 
         if text.startswith('/start'):
-            save_log(sender_id, sender_username, first_name, chat_id, chat_title, thread_id, "START", text)
-            # BIKIN FOTO
-            img_path = create_text_image(sender_username, "/start")
-            send_photo_with_text(chat_id, img_path, f"👋 Bot Aktif!\nHalo <b>@{sender_username}</b>", thread_id)
-            send_message(chat_id, f"Nama :\nUsername :\nJob :\nSpek :\n\n/cek @user\n/hapus @user\n/logs\n/stats", thread_id)
+            save_log(sender_id, sender_username, first_name, chat_id, chat_title, thread_id, "START", text, photo_file_id)
+            send_message(chat_id, f"👋 Bot Aktif!\nHalo @{sender_username}\n\nNama :\nUsername :\nJob :\nSpek :", thread_id)
+            # Kirim notif + foto ke Owner
+            if OWNER_ID and str(chat_id) != str(OWNER_ID):
+                caption = f"🚀 <b>/start</b>\n@{sender_username} ({first_name})\nID:{sender_id}\nChat:{chat_title}"
+                if photo_file_id:
+                    send_photo(OWNER_ID, photo_file_id, caption)
+                else:
+                    send_message(OWNER_ID, caption)
             return {"ok": True}
 
         if text.startswith('/logs') or text.startswith('/stats'):
@@ -161,56 +146,61 @@ def webhook():
             cur.execute("SELECT COUNT(DISTINCT chat_id) FROM bot_logs")
             total_group = cur.fetchone()[0]
             cur.execute("""
-                SELECT user_id, username, first_name, chat_title, created_at 
+                SELECT user_id, username, first_name, chat_title, created_at, photo_file_id 
                 FROM bot_logs WHERE action='START' 
-                ORDER BY id DESC LIMIT 10
+                ORDER BY id DESC LIMIT 15
             """)
             starts = cur.fetchall()
             cur.close()
             conn.close()
 
-            send_message(chat_id, f"📊 <b>STATS BOT</b>\nTotal /start : {total_start}\nTotal Grup : {total_group}\n\nKirim foto log...", thread_id)
+            send_message(chat_id, f"📊 <b>STATS BOT</b>\nTotal /start : {total_start} user\nTotal Grup : {total_group} grup\n\nMengirim foto 15 orang terakhir...", thread_id)
             
-            for uid, uname, fn, ct, dt in starts:
-                img_path = create_text_image(uname or f"{fn}", "/start")
-                caption = f"author : @{uname}\nname : {fn}\nchat : {ct}\n{dt.strftime('%d/%m %H:%M')}"
-                send_photo_with_text(chat_id, img_path, caption, thread_id)
+            # KIRIM FOTO SATU PER SATU
+            for uid, uname, fn, ct, dt, pfid in starts:
+                caption = f"@{uname} ({fn})\n{ct}\n{dt.strftime('%d/%m %H:%M')}\nID:{uid}"
+                if pfid:
+                    send_photo(chat_id, pfid, caption, thread_id)
+                else:
+                    send_message(chat_id, f"👤 {caption}\n(no photo)", thread_id)
             return {"ok": True}
 
-        if text.lower().startswith('/cek'):
-            # BIKIN FOTO JUGA UNTUK /cek
-            img_path = create_text_image(sender_username, "/cek")
-            send_photo_with_text(chat_id, img_path, f"author : @{sender_username}\nmengecek verifikasi", thread_id)
+        if text.lower().startswith('/cek') or text.lower().startswith('/hapus'):
+            # Log juga dengan foto
+            if OWNER_ID and str(chat_id) != str(OWNER_ID):
+                caption = f"📝 <b>{text[:10]}</b>\n@{sender_username} di {chat_title}\n{first_name} - ID:{sender_id}"
+                if photo_file_id:
+                    send_photo(OWNER_ID, photo_file_id, caption)
+            # lanjut proses cek/hapus
+            if text.lower().startswith('/cek'):
+                m = re.search(r'@([A-Za-z0-9_]+)', text)
+                uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
+                if not uname: return {"ok": True}
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("SELECT nama, job, spek FROM verifikasi_list WHERE username=%s", (uname,))
+                row = cur.fetchone()
+                cur.close()
+                conn.close()
+                if row:
+                    send_message(chat_id, f"✅ VERIFIED\n{row[0]} - @{uname}", thread_id)
+                else:
+                    send_message(chat_id, f"❌ @{uname} BELUM VERIF", thread_id)
+                return {"ok": True}
             
-            m = re.search(r'@([A-Za-z0-9_]+)', text)
-            uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
-            if not uname: return {"ok": True}
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT nama, job, spek FROM verifikasi_list WHERE username=%s", (uname,))
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-            if row:
-                send_message(chat_id, f"✅ @{uname} VERIFIED", thread_id)
-            else:
-                send_message(chat_id, f"❌ @{uname} BELUM VERIF", thread_id)
-            return {"ok": True}
+            if text.lower().startswith('/hapus'):
+                m = re.search(r'@([A-Za-z0-9_]+)', text)
+                uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
+                conn.commit()
+                cur.close()
+                conn.close()
+                send_message(chat_id, f"🗑️ @{uname} dihapus!", thread_id)
+                return {"ok": True}
 
-        if text.lower().startswith('/hapus'):
-            img_path = create_text_image(sender_username, "/hapus")
-            send_photo_with_text(chat_id, img_path, f"author : @{sender_username}", thread_id)
-            m = re.search(r'@([A-Za-z0-9_]+)', text)
-            uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
-            conn.commit()
-            cur.close()
-            conn.close()
-            send_message(chat_id, f"🗑️ @{uname} dihapus!", thread_id)
-            return {"ok": True}
-
+        # INPUT VERIF
         if 'Nama' in text and 'Username' in text and 'Job' in text:
             nama = re.search(r'Nama\s*:\s*(.*)', text, re.I)
             username = re.search(r'Username\s*:\s*@?(\S+)', text, re.I)
@@ -228,16 +218,14 @@ def webhook():
                 conn.commit()
                 cur.close()
                 conn.close()
-                img_path = create_text_image(uname, "VERIFIED")
-                send_photo_with_text(chat_id, img_path, f"✅ Berhasil Verif @{uname}", thread_id)
+                send_message(chat_id, f"✅ Berhasil!\nNama: {nama.group(1).strip()}\nUsername: @{uname}", thread_id)
                 return {"ok": True}
 
         if thread_id in PROTECTED_TOPICS:
             if text.startswith('/'): return {"ok": True}
             if not is_verified(sender_username):
                 delete_message(chat_id, message_id)
-                img_path = create_text_image(sender_username, "BLOCKED")
-                send_photo_with_text(chat_id, img_path, f"⛔ @{sender_username} pesan dihapus! Belum verifikasi.\nVerif di topic 54:\nNama :\nUsername :\nJob :\nSpek :", thread_id)
+                send_message(chat_id, f"⛔ @{sender_username} pesan dihapus! Belum verifikasi.\nVerif di topic 54:\nNama :\nUsername :\nJob :\nSpek :", thread_id)
                 return {"ok": True}
 
         return {"ok": True}
@@ -247,7 +235,4 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Bot v8 Text Image Aktif"
-
-if __name__ == "__main__":
-    app.run()
+    return "Bot v7 Foto Aktif"
