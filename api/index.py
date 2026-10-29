@@ -1,203 +1,138 @@
 from flask import Flask, request
-import os, requests, re, json
+import os, psycopg2, re, requests
 from datetime import datetime
 
 app = Flask(__name__)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 DATABASE_URL = os.getenv("DATABASE_URL")
-GROUP_ID = os.getenv("JOGJALEND_GROUP_ID") or os.getenv("MAIN_GROUP_ID") or ""
+GROUP_ID = int(os.getenv("JOGJALEND_GROUP_ID", "-1003920359218"))
 THREAD_ID = int(os.getenv("VERIF_THREAD_ID", "54"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-try:
-    import psycopg2
-    HAS_PG = True
-except:
-    HAS_PG = False
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
 
-def pg_conn():
-    if not DATABASE_URL or not HAS_PG: return None
-    try: return psycopg2.connect(DATABASE_URL)
-    except: return None
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS verifikasi_list (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE,
+            nama TEXT,
+            cabang TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-def pg_init():
-    conn = pg_conn()
-    if not conn: return
+def send_message(chat_id, text, thread_id=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    requests.post(url, json=payload)
+
+@app.route('/api/index', methods=['POST'])
+def webhook():
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS verifikasi_list (
-                user_id TEXT,
-                username TEXT,
-                name TEXT,
-                verified_at TIMESTAMP DEFAULT NOW(),
-                source_msg_id TEXT,
-                PRIMARY KEY (user_id)
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS verifikasi_username (
-                username TEXT PRIMARY KEY,
-                user_id TEXT,
-                verified_at TIMESTAMP DEFAULT NOW()
-            );
-        """)
-        conn.commit(); cur.close(); conn.close()
-        print("Neon verif table ready")
-    except Exception as e:
-        print(f"Init error {e}")
-
-pg_init()
-
-def add_verif(user_id, username, name, msg_id):
-    conn = pg_conn()
-    if not conn: return False
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO verifikasi_list (user_id, username, name, source_msg_id)
-            VALUES (%s,%s,%s,%s)
-            ON CONFLICT (user_id) DO UPDATE SET username=%s, name=%s, verified_at=NOW();
-        """, (str(user_id), username, name, str(msg_id), username, name))
-        if username:
-            cur.execute("""
-                INSERT INTO verifikasi_username (username, user_id)
-                VALUES (%s,%s)
-                ON CONFLICT (username) DO UPDATE SET user_id=%s, verified_at=NOW();
-            """, (username.lower(), str(user_id), str(user_id)))
-        conn.commit(); cur.close(); conn.close()
-        return True
-    except Exception as e:
-        print(f"add_verif error {e}")
-        return False
-
-def is_verified(user_id, username):
-    conn = pg_conn()
-    if not conn: return False
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM verifikasi_list WHERE user_id=%s;", (str(user_id),))
-        if cur.fetchone():
-            cur.close(); conn.close(); return True
-        if username:
-            cur.execute("SELECT 1 FROM verifikasi_username WHERE username=%s;", (username.lower(),))
-            if cur.fetchone():
-                cur.close(); conn.close(); return True
-        cur.close(); conn.close()
-        return False
-    except: return False
-
-def parse_verif_message(text, entities=None):
-    # Format yang didukung di Topic 54:
-    # @username udah verif
-    # ID: 123456789 Nama: Jogja Lend
-    # atau forward kontak / user id
-    results = []
-    if not text: return results
-    # cari @username
-    usernames = re.findall(r'@([a-zA-Z0-9_]{5,32})', text)
-    for u in usernames:
-        results.append({"user_id": f"@{u}", "username": u, "name": u})
-    # cari angka ID telegram 7-10 digit
-    ids = re.findall(r'\b(\d{7,11})\b', text)
-    for i in ids:
-        results.append({"user_id": i, "username": "", "name": f"User {i}"})
-    return results
-
-def send(chat_id, text, thread_id=None, kb=None):
-    p={"chat_id": int(chat_id), "text": text, "parse_mode":"HTML"}
-    if thread_id: p["message_thread_id"]=thread_id
-    if kb: p["reply_markup"]=kb
-    try: requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=p, timeout=5)
-    except: pass
-
-def delete_msg(chat_id, msg_id):
-    try: requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage", json={"chat_id": int(chat_id), "message_id": msg_id}, timeout=3)
-    except: pass
-
-@app.route("/", methods=["GET","POST"])
-@app.route("/api/index", methods=["GET","POST"])
-def index():
-    if request.method=="GET":
-        return f"VERIF SYNC BOT - Thread {THREAD_ID} - Neon {'OK' if HAS_PG else 'NO PG'}",200
-
-    data=request.get_json(force=True, silent=True) or {}
-    if "message" not in data: return "ok",200
-
-    msg=data["message"]
-    chat_id=str(msg["chat"]["id"])
-    thread_id=msg.get("message_thread_id")
-    text=msg.get("text","") or msg.get("caption","")
-    from_user=msg.get("from",{})
-    uid=str(from_user.get("id",""))
-    username=from_user.get("username","")
-
-    # === 1. MONITOR TOPIC 54 - AUTO SYNC VERIF ===
-    if str(thread_id)==str(THREAD_ID) and chat_id==str(GROUP_ID) or str(thread_id)==str(THREAD_ID):
-        # jika ada user di mention atau di forward
-        parsed = parse_verif_message(text)
-        # jika reply ke user atau forward
-        if "reply_to_message" in msg:
-            ruser=msg["reply_to_message"].get("from",{})
-            parsed.append({"user_id": str(ruser.get("id")), "username": ruser.get("username",""), "name": ruser.get("first_name","")})
+        init_db()
+        data = request.json
+        message = data.get('message') or data.get('edited_message')
+        if not message:
+            return {"ok": True}
         
-        for p in parsed:
-            real_uid = p["user_id"]
-            if real_uid.startswith("@"): continue # skip kalo cuma @username tanpa ID, simpen username aja
-            add_verif(real_uid, p["username"], p["name"], msg.get("message_id"))
-            send(chat_id, f"✅ Verifikasi tersync: @{p['username'] or p['name']} (ID:{real_uid}) → Neon", thread_id=thread_id)
-        
-        # simpan username juga kalo cuma @
-        for p in parsed:
-            if p["user_id"].startswith("@"):
-                add_verif(p["user_id"], p["username"], p["name"], msg.get("message_id"))
+        chat_id = message['chat']['id']
+        text = message.get('text','').strip()
+        thread_id = message.get('message_thread_id')
 
-    # === 2. CEK DI GRUP UTAMA - AUTO DELETE JIKA BELUM VERIF ===
-    # hanya cek di luar thread verif, di grup utama
-    if thread_id != THREAD_ID and chat_id==str(GROUP_ID):
-        # skip admin & bot
-        if text.startswith("/cek") or text.startswith("/verif") or text.startswith("/sync"):
-            pass # jangan hapus command
-        else:
-            # cek verif
-            if uid and not is_verified(uid, username):
-                # jangan langsung kick, mute + warning dulu
-                # delete_msg(chat_id, msg.get("message_id"))
-                send(chat_id, f"⚠️ @{username or from_user.get('first_name')} belum terverifikasi di Topic 54!\nSilakan verifikasi dulu di https://t.me/c/xxx/{THREAD_ID}\nPesan kamu akan dihapus jika belum verif.", thread_id=thread_id)
+        # /start
+        if text.startswith('/start'):
+            send_message(chat_id,
+                "👋 <b>Bot Sync JogjaLend Aktif!</b>\n\n"
+                f"📍 Grup ID: <code>{GROUP_ID}</code>\n"
+                f"📌 Topic Verif: {THREAD_ID}\n\n"
+                "Ketik /help untuk daftar perintah",
+                thread_id)
+            return {"ok": True}
 
-    # === 3. COMMANDS ===
-    if text.startswith("/cek"):
-        target = text.split("@")[-1].split()[0] if "@" in text else ""
-        if "reply_to_message" in msg:
-            tuser=msg["reply_to_message"]["from"]
-            target_id=str(tuser["id"]); target_un=tuser.get("username","")
-            ver = is_verified(target_id, target_un)
-            send(chat_id, f"{'✅ SUDAH' if ver else '❌ BELUM'} Verifikasi\nID: {target_id}\nUsername: @{target_un}\nNama: {tuser.get('first_name')}", thread_id=thread_id)
-        elif target:
-            ver = is_verified("", target)
-            send(chat_id, f"{'✅ SUDAH' if ver else '❌ BELUM'} Verifikasi\nUsername: @{target}", thread_id=thread_id)
-        else:
-            ver = is_verified(uid, username)
-            send(chat_id, f"Kamu {'✅ SUDAH' if ver else '❌ BELUM'} Verifikasi\nID: {uid}\nUsername: @{username}", thread_id=thread_id)
+        # /help
+        if text.startswith('/help'):
+            send_message(chat_id,
+                "📖 <b>Perintah Bot Sync:</b>\n\n"
+                "1. <b>Input Data (di Topic 54)</b>\n"
+                "Nama: Budi\n"
+                "Username: @budi\n"
+                "Cabang: Jogja\n\n"
+                "2. /cek @username - Cek data user\n"
+                "3. /hapus @username - Hapus data\n"
+                "4. /start - Info bot\n"
+                "5. /help - Bantuan ini",
+                thread_id)
+            return {"ok": True}
 
-    if text.startswith("/verif") and msg.get("from",{}).get("id"):
-        # hanya admin bisa manual verif
-        try:
-            r=requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember", params={"chat_id": chat_id, "user_id": msg["from"]["id"]}, timeout=3).json()
-            is_adm=r.get("result",{}).get("status") in ["administrator","creator"]
-        except: is_adm=False
-        if is_adm:
-            if "reply_to_message" in msg:
-                tuser=msg["reply_to_message"]["from"]
-                add_verif(str(tuser["id"]), tuser.get("username",""), tuser.get("first_name",""), msg.get("message_id"))
-                send(chat_id, f"✅ Manual Verif: @{tuser.get('username')} ID {tuser['id']} → Neon", thread_id=thread_id)
+        # /cek
+        if text.lower().startswith('/cek'):
+            m = re.search(r'@?(\w+)', text)
+            if m:
+                uname = m.group(1).lower().replace('@','').replace('cek','').strip()
+                if uname:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("SELECT nama, cabang, created_at FROM verifikasi_list WHERE username=%s", (uname,))
+                    row = cur.fetchone()
+                    cur.close()
+                    conn.close()
+                    if row:
+                        send_message(chat_id, f"✅ <b>Ketemu!</b>\n\nNama: {row[0]}\nUsername: @{uname}\nCabang: {row[1]}\nTanggal: {row[2]}", thread_id)
+                    else:
+                        send_message(chat_id, f"❌ @{uname} belum ada di database", thread_id)
+            return {"ok": True}
 
-    if text.startswith("/syncstat"):
-        conn=pg_conn()
-        if conn:
-            cur=conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM verifikasi_list;")
-            cnt=cur.fetchone()[0]
-            cur.close(); conn.close()
-            send(chat_id, f"📊 Total terverifikasi di Neon: {cnt}\nSync dari Topic {THREAD_ID}", thread_id=thread_id)
+        # /hapus
+        if text.lower().startswith('/hapus'):
+            m = re.search(r'@?(\w+)', text)
+            if m:
+                uname = m.group(1).lower().replace('@','').replace('hapus','').strip()
+                if uname:
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    send_message(chat_id, f"🗑️ Data @{uname} dihapus!", thread_id)
+            return {"ok": True}
 
-    return "ok",200
+        # Input format Nama: Username: Cabang:
+        if 'Nama:' in text and 'Username:' in text:
+            nama = re.search(r'Nama:\s*(.*)', text, re.I)
+            username = re.search(r'Username:\s*@?(\S+)', text, re.I)
+            cabang = re.search(r'Cabang:\s*(.*)', text, re.I)
+            if nama and username:
+                uname = username.group(1).lower().strip('@ ,')
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO verifikasi_list (username, nama, cabang)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (username) DO UPDATE SET nama=%s, cabang=%s
+                """, (uname, nama.group(1).strip(), cabang.group(1).strip() if cabang else '-', nama.group(1).strip(), cabang.group(1).strip() if cabang else '-'))
+                conn.commit()
+                cur.close()
+                conn.close()
+                send_message(chat_id, f"✅ <b>Berhasil!</b>\n\nNama: {nama.group(1).strip()}\nUsername: @{uname}\nCabang: {cabang.group(1).strip() if cabang else '-'}", thread_id)
+
+        return {"ok": True}
+    except Exception as e:
+        print("ERROR:", e)
+        return {"ok": True}
+
+@app.route('/', methods=['GET'])
+def home():
+    return "Bot Sync JogjaLend Aktif! v2"
+
+if __name__ == "__main__":
+    app.run()
