@@ -6,9 +6,7 @@ app = Flask(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# TOPIC YANG DIJAGA - kalo belum verif, auto delete
 PROTECTED_TOPICS = [7245, 1328, 6848, 413, 4, 1745, 4843, 5250, 410]
-VERIF_TOPIC = 54
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -23,12 +21,9 @@ def init_db():
             nama TEXT,
             job TEXT,
             spek TEXT,
-            cabang TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
-    cur.execute("ALTER TABLE verifikasi_list ADD COLUMN IF NOT EXISTS job TEXT")
-    cur.execute("ALTER TABLE verifikasi_list ADD COLUMN IF NOT EXISTS spek TEXT")
     conn.commit()
     cur.close()
     conn.close()
@@ -42,8 +37,7 @@ def send_message(chat_id, text, thread_id=None):
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
-    payload = {"chat_id": chat_id, "message_id": message_id}
-    requests.post(url, json=payload)
+    requests.post(url, json={"chat_id": chat_id, "message_id": message_id})
 
 def is_verified(username):
     if not username:
@@ -71,15 +65,13 @@ def webhook():
         thread_id = message.get('message_thread_id')
         sender = message.get('from', {})
         sender_username = sender.get('username','').lower()
-        sender_id = sender.get('id')
 
-        # === FITUR COMMAND ===
         if text.startswith('/start'):
-            send_message(chat_id, "👋 <b>Bot Sync Aktif v5 Auto-Delete!</b>\n\nFormat:\nNama :\nUsername :\nJob :\nSpek :\n\n/cek @user\n/hapus @user\n/help", thread_id)
+            send_message(chat_id, "👋 <b>Bot Aktif!</b>\n\nNama :\nUsername :\nJob :\nSpek :\n\n/cek @user\n/hapus @user", thread_id)
             return {"ok": True}
 
         if text.startswith('/help'):
-            send_message(chat_id, "📖 <b>Format:</b>\nNama : Budi\nUsername : @budi\nJob : Programmer\nSpek : PC\n\n<b>Perintah:</b>\n/cek @username\n/hapus @username\n\n<b>Protected Topic:</b>\n7245,1328,6848,413,4,1745,4843,5250,410\nAuto delete jika belum verif!", thread_id)
+            send_message(chat_id, "Nama : Budi\nUsername : @budi\nJob : Programmer\nSpek : PC\n\n/cek @username\n/hapus @username", thread_id)
             return {"ok": True}
 
         if text.lower().startswith('/cek'):
@@ -103,9 +95,6 @@ def webhook():
         if text.lower().startswith('/hapus'):
             m = re.search(r'@([A-Za-z0-9_]+)', text)
             uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
-            if not uname:
-                send_message(chat_id, "❓ /hapus @username", thread_id)
-                return {"ok": True}
             conn = get_db()
             cur = conn.cursor()
             cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
@@ -115,8 +104,8 @@ def webhook():
             send_message(chat_id, f"🗑️ @{uname} dihapus!", thread_id)
             return {"ok": True}
 
-        # === INPUT DATA VERIFIKASI (DI TOPIC 54) ===
-        if 'Nama' in text and 'Username' in text:
+        # INPUT DATA
+        if 'Nama' in text and 'Username' in text and 'Job' in text:
             nama = re.search(r'Nama\s*:\s*(.*)', text, re.I)
             username = re.search(r'Username\s*:\s*@?(\S+)', text, re.I)
             job = re.search(r'Job\s*:\s*(.*)', text, re.I)
@@ -133,22 +122,16 @@ def webhook():
                 conn.commit()
                 cur.close()
                 conn.close()
-                send_message(chat_id, f"✅ <b>Berhasil Verif!</b>\nNama: {nama.group(1).strip()}\nUsername: @{uname}\nJob: {job.group(1).strip() if job else '-'}\nSpek: {spek.group(1).strip() if spek else '-'}", thread_id)
+                send_message(chat_id, f"✅ <b>Berhasil!</b>\nNama: {nama.group(1).strip()}\nUsername: @{uname}\nJob: {job.group(1).strip() if job else '-'}\nSpek: {spek.group(1).strip() if spek else '-'}", thread_id)
                 return {"ok": True}
 
-        # === AUTO DELETE LOGIC ===
-        # Cek apakah chat ini di topic protected?
+        # AUTO DELETE
         if thread_id in PROTECTED_TOPICS:
-            # Jangan delete command dan bot sendiri
             if text.startswith('/'):
                 return {"ok": True}
-            
-            # Cek apakah user sudah verif?
             if not is_verified(sender_username):
-                # Hapus pesan
                 delete_message(chat_id, message_id)
-                # Kirim warning 5 detik lalu hapus? Kita kirim warning aja
-                send_message(chat_id, f"⛔ @{sender_username} <b>pesan dihapus!</b>\nBelum masuk list verifikasi.\n\nSilakan verif dulu di topic 54 dengan format:\nNama :\nUsername :\nJob :\nSpek :", thread_id)
+                send_message(chat_id, f"⛔ @{sender_username} pesan dihapus! Belum verifikasi.\n\nSilakan verif di topic 54:\nNama :\nUsername :\nJob :\nSpek :", thread_id)
                 return {"ok": True}
 
         return {"ok": True}
@@ -158,7 +141,7 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Bot Sync v5 Auto-Delete Aktif"
+    return "Bot v5.1 Aktif"
 
 if __name__ == "__main__":
     app.run()
