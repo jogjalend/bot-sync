@@ -1,10 +1,12 @@
 from flask import Flask, request
 import os, psycopg2, re, requests
+from datetime import datetime
 
 app = Flask(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = os.getenv("OWNER_ID") # ID Telegram lu, ambil di @userinfobot
 
 PROTECTED_TOPICS = [7245, 1328, 6848, 413, 4, 1745, 4843, 5250, 410]
 
@@ -24,6 +26,20 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_logs (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            username TEXT,
+            first_name TEXT,
+            chat_id BIGINT,
+            chat_title TEXT,
+            thread_id BIGINT,
+            action TEXT,
+            message TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -40,8 +56,7 @@ def delete_message(chat_id, message_id):
     requests.post(url, json={"chat_id": chat_id, "message_id": message_id})
 
 def is_verified(username):
-    if not username:
-        return False
+    if not username: return False
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM verifikasi_list WHERE username=%s", (username.lower(),))
@@ -49,6 +64,20 @@ def is_verified(username):
     cur.close()
     conn.close()
     return bool(row)
+
+def save_log(user_id, username, first_name, chat_id, chat_title, thread_id, action, msg=""):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO bot_logs (user_id, username, first_name, chat_id, chat_title, thread_id, action, message)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (user_id, username, first_name, chat_id, chat_title, thread_id, action, msg[:500]))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print("LOG ERROR:", e)
 
 @app.route('/api/index', methods=['POST'])
 def webhook():
@@ -64,14 +93,68 @@ def webhook():
         text = message.get('text','').strip()
         thread_id = message.get('message_thread_id')
         sender = message.get('from', {})
+        chat_info = message.get('chat', {})
         sender_username = sender.get('username','').lower()
+        sender_id = sender.get('id')
+        first_name = sender.get('first_name','')
+        chat_title = chat_info.get('title','Private')
+
+        # LOG SEMUA AKTIVITAS
+        save_log(sender_id, sender_username, first_name, chat_id, chat_title, thread_id, "message", text)
 
         if text.startswith('/start'):
-            send_message(chat_id, "👋 <b>Bot Aktif!</b>\n\nNama :\nUsername :\nJob :\nSpek :\n\n/cek @user\n/hapus @user", thread_id)
+            save_log(sender_id, sender_username, first_name, chat_id, chat_title, thread_id, "START", text)
+            send_message(chat_id, f"👋 Bot Aktif!\n\nHalo @{sender_username}\n\nNama :\nUsername :\nJob :\nSpek :\n\n/cek @user\n/hapus @user\n/logs\n/stats", thread_id)
             return {"ok": True}
 
-        if text.startswith('/help'):
-            send_message(chat_id, "Nama : Budi\nUsername : @budi\nJob : Programmer\nSpek : PC\n\n/cek @username\n/hapus @username", thread_id)
+        # === FITUR KHUSUS OWNER ===
+        if text.startswith('/logs') or text.startswith('/stats'):
+            # Cek owner (opsional, kalau OWNER_ID belum di set, semua bisa)
+            if OWNER_ID and str(sender_id) != str(OWNER_ID):
+                send_message(chat_id, "⛔ Hanya owner!", thread_id)
+                return {"ok": True}
+            
+            conn = get_db()
+            cur = conn.cursor()
+            
+            # Hitung total
+            cur.execute("SELECT COUNT(DISTINCT user_id) FROM bot_logs WHERE action='START'")
+            total_start = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT chat_id) FROM bot_logs")
+            total_group = cur.fetchone()[0]
+            
+            # Ambil 20 log terakhir yang klik start
+            cur.execute("""
+                SELECT username, first_name, chat_title, created_at, action 
+                FROM bot_logs WHERE action='START' 
+                ORDER BY id DESC LIMIT 15
+            """)
+            starts = cur.fetchall()
+            
+            # Ambil grup mana aja bot connect
+            cur.execute("""
+                SELECT DISTINCT chat_id, chat_title, COUNT(*) as total_msg 
+                FROM bot_logs 
+                GROUP BY chat_id, chat_title 
+                ORDER BY total_msg DESC LIMIT 10
+            """)
+            groups = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            msg = f"<b>📊 STATS BOT</b>\n\n"
+            msg += f"Total /start : {total_start} user\n"
+            msg += f"Total Grup : {total_group} grup\n\n"
+            
+            msg += f"<b>👥 15 Orang Terakhir Klik Start:</b>\n"
+            for u, fn, ct, dt, act in starts:
+                msg += f"- @{u} ({fn}) - {ct} - {dt.strftime('%d/%m %H:%M')}\n"
+            
+            msg += f"\n<b>📍 Bot Connect Kemana:</b>\n"
+            for gid, gtitle, cnt in groups:
+                msg += f"- {gtitle} (ID:{gid}) - {cnt} pesan\n"
+            
+            send_message(chat_id, msg, thread_id)
             return {"ok": True}
 
         if text.lower().startswith('/cek'):
@@ -104,7 +187,6 @@ def webhook():
             send_message(chat_id, f"🗑️ @{uname} dihapus!", thread_id)
             return {"ok": True}
 
-        # INPUT DATA
         if 'Nama' in text and 'Username' in text and 'Job' in text:
             nama = re.search(r'Nama\s*:\s*(.*)', text, re.I)
             username = re.search(r'Username\s*:\s*@?(\S+)', text, re.I)
@@ -127,11 +209,10 @@ def webhook():
 
         # AUTO DELETE
         if thread_id in PROTECTED_TOPICS:
-            if text.startswith('/'):
-                return {"ok": True}
+            if text.startswith('/'): return {"ok": True}
             if not is_verified(sender_username):
                 delete_message(chat_id, message_id)
-                send_message(chat_id, f"⛔ @{sender_username} pesan dihapus! Belum verifikasi.\n\nSilakan verif di topic 54:\nNama :\nUsername :\nJob :\nSpek :", thread_id)
+                send_message(chat_id, f"⛔ @{sender_username} pesan dihapus! Belum verifikasi.\n\nVerif di topic 54:\nNama :\nUsername :\nJob :\nSpek :", thread_id)
                 return {"ok": True}
 
         return {"ok": True}
@@ -141,7 +222,7 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Bot v5.1 Aktif"
+    return "Bot v6 + Logger Aktif"
 
 if __name__ == "__main__":
     app.run()
