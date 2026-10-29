@@ -4,8 +4,6 @@ import os, psycopg2, re, requests
 app = Flask(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-GROUP_ID = int(os.getenv("JOGJALEND_GROUP_ID", "-1003920359218"))
-THREAD_ID = int(os.getenv("VERIF_THREAD_ID", "54"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 def get_db():
@@ -19,10 +17,15 @@ def init_db():
             id SERIAL PRIMARY KEY,
             username TEXT UNIQUE,
             nama TEXT,
+            job TEXT,
+            spek TEXT,
             cabang TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    # Tambah kolom baru kalau belum ada
+    cur.execute("ALTER TABLE verifikasi_list ADD COLUMN IF NOT EXISTS job TEXT")
+    cur.execute("ALTER TABLE verifikasi_list ADD COLUMN IF NOT EXISTS spek TEXT")
     conn.commit()
     cur.close()
     conn.close()
@@ -50,92 +53,81 @@ def webhook():
         if text.startswith('/start'):
             send_message(chat_id,
                 "👋 <b>Bot Sync JogjaLend Aktif!</b>\n\n"
-                f"📍 Grup ID: <code>{GROUP_ID}</code>\n"
-                f"📌 Topic Verif: {THREAD_ID}\n\n"
-                "Ketik /help untuk daftar perintah",
+                "Format baru:\n"
+                "Nama : Nadyn\n"
+                "Username : @nadynxyz\n"
+                "Job : Designer\n"
+                "Spek : Laptop\n\n"
+                "Ketik /help",
                 thread_id)
             return {"ok": True}
 
         if text.startswith('/help'):
             send_message(chat_id,
-                "📖 <b>Perintah Bot Sync:</b>\n\n"
-                "1. <b>Input Data (di Topic 54)</b>\n"
-                "Nama: Budi\n"
-                "Username: @budi\n"
-                "Cabang: Jogja\n\n"
-                "2. /cek @username - Cek data user\n"
-                "3. /hapus @username - Hapus data\n"
-                "4. /start - Info bot\n"
-                "5. /help - Bantuan ini",
+                "📖 <b>Format Baru:</b>\n\n"
+                "Nama : Budi\n"
+                "Username : @budi\n"
+                "Job : Programmer\n"
+                "Spek : PC High\n\n"
+                "Perintah:\n"
+                "/cek @username\n"
+                "/hapus @username\n"
+                "/start",
                 thread_id)
             return {"ok": True}
 
         if text.lower().startswith('/cek'):
             m = re.search(r'@([A-Za-z0-9_]+)', text)
-            uname = None
-            if m:
-                uname = m.group(1).lower()
-            else:
-                parts = text.split()
-                if len(parts) > 1:
-                    uname = parts[1].lower().replace('@','').strip()
-            
+            uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
             if not uname:
                 send_message(chat_id, "❓ Format: /cek @username", thread_id)
                 return {"ok": True}
-
             conn = get_db()
             cur = conn.cursor()
-            cur.execute("SELECT nama, cabang, created_at FROM verifikasi_list WHERE username=%s", (uname,))
+            cur.execute("SELECT nama, job, spek FROM verifikasi_list WHERE username=%s", (uname,))
             row = cur.fetchone()
             cur.close()
             conn.close()
             if row:
-                send_message(chat_id, f"✅ <b>Ketemu!</b>\n\nNama: {row[0]}\nUsername: @{uname}\nCabang: {row[1]}\nTanggal: {row[2]}", thread_id)
+                send_message(chat_id, f"✅ <b>Ketemu!</b>\n\nNama: {row[0]}\nUsername: @{uname}\nJob: {row[1]}\nSpek: {row[2]}", thread_id)
             else:
-                send_message(chat_id, f"❌ @{uname} belum ada di database", thread_id)
+                send_message(chat_id, f"❌ @{uname} belum ada", thread_id)
             return {"ok": True}
 
         if text.lower().startswith('/hapus'):
             m = re.search(r'@([A-Za-z0-9_]+)', text)
-            uname = None
-            if m:
-                uname = m.group(1).lower()
-            else:
-                parts = text.split()
-                if len(parts) > 1:
-                    uname = parts[1].lower().replace('@','').strip()
-            
+            uname = m.group(1).lower() if m else (text.split()[1].lower().replace('@','') if len(text.split())>1 else None)
             if not uname:
                 send_message(chat_id, "❓ Format: /hapus @username", thread_id)
                 return {"ok": True}
-
             conn = get_db()
             cur = conn.cursor()
             cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
             conn.commit()
             cur.close()
             conn.close()
-            send_message(chat_id, f"🗑️ Data @{uname} dihapus!", thread_id)
+            send_message(chat_id, f"🗑️ @{uname} dihapus!", thread_id)
             return {"ok": True}
 
-        if 'Nama:' in text and 'Username:' in text:
-            nama = re.search(r'Nama:\s*(.*)', text, re.I)
-            username = re.search(r'Username:\s*@?(\S+)', text, re.I)
-            cabang = re.search(r'Cabang:\s*(.*)', text, re.I)
+        # FORMAT BARU: Nama: Username: Job: Spek:
+        if 'Nama' in text and 'Username' in text and 'Job' in text:
+            nama = re.search(r'Nama\s*:\s*(.*)', text, re.I)
+            username = re.search(r'Username\s*:\s*@?(\S+)', text, re.I)
+            job = re.search(r'Job\s*:\s*(.*)', text, re.I)
+            spek = re.search(r'Spek\s*:\s*(.*)', text, re.I)
             if nama and username:
                 uname = username.group(1).lower().strip('@ ,')
                 conn = get_db()
                 cur = conn.cursor()
                 cur.execute("""
-                    INSERT INTO verifikasi_list (username, nama, cabang)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (username) DO UPDATE SET nama=%s, cabang=%s
-                """, (uname, nama.group(1).strip(), cabang.group(1).strip() if cabang else '-', nama.group(1).strip(), cabang.group(1).strip() if cabang else '-'))
+                    INSERT INTO verifikasi_list (username, nama, job, spek)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (username) DO UPDATE SET nama=%s, job=%s, spek=%s
+                """, (uname, nama.group(1).strip(), job.group(1).strip() if job else '-', spek.group(1).strip() if spek else '-', nama.group(1).strip(), job.group(1).strip() if job else '-', spek.group(1).strip() if spek else '-'))
                 conn.commit()
                 cur.close()
                 conn.close()
-                send_message(chat_id, f"✅ <b>Berhasil!</b>\n\nNama: {nama.group(1).strip()}\nUsername: @{uname}\nCabang: {cabang.group(1).strip() if cabang else '-'}", thread_id)
+                send_message(chat_id, f"✅ <b>Berhasil!</b>\n\nNama: {nama.group(1).strip()}\nUsername: @{uname}\nJob: {job.group(1).strip() if job else '-'}\nSpek: {spek.group(1).strip() if spek else '-'}", thread_id)
 
         return {"ok": True}
     except Exception as e:
@@ -144,7 +136,7 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Bot Sync JogjaLend Aktif! v3 FIX"
+    return "Bot Sync v4 Format Baru"
 
 if __name__ == "__main__":
     app.run()
