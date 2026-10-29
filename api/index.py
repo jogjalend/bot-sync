@@ -1,6 +1,5 @@
 from flask import Flask, request
 import os, psycopg2, re, requests
-from datetime import datetime
 
 app = Flask(__name__)
 
@@ -48,7 +47,6 @@ def webhook():
         text = message.get('text','').strip()
         thread_id = message.get('message_thread_id')
 
-        # /start
         if text.startswith('/start'):
             send_message(chat_id,
                 "👋 <b>Bot Sync JogjaLend Aktif!</b>\n\n"
@@ -58,7 +56,6 @@ def webhook():
                 thread_id)
             return {"ok": True}
 
-        # /help
         if text.startswith('/help'):
             send_message(chat_id,
                 "📖 <b>Perintah Bot Sync:</b>\n\n"
@@ -73,40 +70,55 @@ def webhook():
                 thread_id)
             return {"ok": True}
 
-        # /cek
         if text.lower().startswith('/cek'):
-            m = re.search(r'@?(\w+)', text)
+            m = re.search(r'@([A-Za-z0-9_]+)', text)
+            uname = None
             if m:
-                uname = m.group(1).lower().replace('@','').replace('cek','').strip()
-                if uname:
-                    conn = get_db()
-                    cur = conn.cursor()
-                    cur.execute("SELECT nama, cabang, created_at FROM verifikasi_list WHERE username=%s", (uname,))
-                    row = cur.fetchone()
-                    cur.close()
-                    conn.close()
-                    if row:
-                        send_message(chat_id, f"✅ <b>Ketemu!</b>\n\nNama: {row[0]}\nUsername: @{uname}\nCabang: {row[1]}\nTanggal: {row[2]}", thread_id)
-                    else:
-                        send_message(chat_id, f"❌ @{uname} belum ada di database", thread_id)
+                uname = m.group(1).lower()
+            else:
+                parts = text.split()
+                if len(parts) > 1:
+                    uname = parts[1].lower().replace('@','').strip()
+            
+            if not uname:
+                send_message(chat_id, "❓ Format: /cek @username", thread_id)
+                return {"ok": True}
+
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT nama, cabang, created_at FROM verifikasi_list WHERE username=%s", (uname,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row:
+                send_message(chat_id, f"✅ <b>Ketemu!</b>\n\nNama: {row[0]}\nUsername: @{uname}\nCabang: {row[1]}\nTanggal: {row[2]}", thread_id)
+            else:
+                send_message(chat_id, f"❌ @{uname} belum ada di database", thread_id)
             return {"ok": True}
 
-        # /hapus
         if text.lower().startswith('/hapus'):
-            m = re.search(r'@?(\w+)', text)
+            m = re.search(r'@([A-Za-z0-9_]+)', text)
+            uname = None
             if m:
-                uname = m.group(1).lower().replace('@','').replace('hapus','').strip()
-                if uname:
-                    conn = get_db()
-                    cur = conn.cursor()
-                    cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    send_message(chat_id, f"🗑️ Data @{uname} dihapus!", thread_id)
+                uname = m.group(1).lower()
+            else:
+                parts = text.split()
+                if len(parts) > 1:
+                    uname = parts[1].lower().replace('@','').strip()
+            
+            if not uname:
+                send_message(chat_id, "❓ Format: /hapus @username", thread_id)
+                return {"ok": True}
+
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM verifikasi_list WHERE username=%s", (uname,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            send_message(chat_id, f"🗑️ Data @{uname} dihapus!", thread_id)
             return {"ok": True}
 
-        # Input format Nama: Username: Cabang:
         if 'Nama:' in text and 'Username:' in text:
             nama = re.search(r'Nama:\s*(.*)', text, re.I)
             username = re.search(r'Username:\s*@?(\S+)', text, re.I)
@@ -132,7 +144,7 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Bot Sync JogjaLend Aktif! v2"
+    return "Bot Sync JogjaLend Aktif! v3 FIX"
 
 if __name__ == "__main__":
     app.run()
